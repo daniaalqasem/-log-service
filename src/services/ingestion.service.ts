@@ -1,0 +1,129 @@
+import { logEntrySchema } from '../validation/logEntry.schema';
+import { levelToInt } from '../db/schema';
+import { pool } from '../db/client';
+import { from as copyFrom } from 'pg-copy-streams';
+import { pipeline } from 'node:stream/promises';
+import { Readable } from 'node:stream';
+
+interface RejectedEntry {
+  index: number;
+  reason: string;
+}
+
+interface ValidatedEntry {
+  ts: string;
+  level: number;
+  service: string;
+  message: string;
+  attributes: Record<string, string | number | boolean>;
+}
+
+interface ValidationResult {
+  accepted: ValidatedEntry[];
+  rejected: RejectedEntry[];
+}
+
+export function validateBatch(rawLogs: unknown[]): ValidationResult {
+  const accepted: ValidatedEntry[] = [];
+  const rejected: RejectedEntry[] = [];
+
+  rawLogs.forEach((rawEntry, index) => {
+    const result = logEntrySchema.safeParse(rawEntry);
+
+    if (!result.success) {
+      const firstIssue = result.error.issues[0];
+      rejected.push({
+        index,
+        reason: firstIssue.message,
+      });
+      return;
+    }
+
+    accepted.push({
+      ts: result.data.timestamp,
+      level: levelToInt(result.data.level),
+      service: result.data.service,
+      message: result.data.message,
+      attributes: result.data.attributes ?? {},
+    });
+  });
+
+  return { accepted, rejected };
+}
+
+
+function getWeekStart(date: Date): Date {
+  const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayOfWeek = d.getUTCDay();
+  const daysSinceMonday = (dayOfWeek + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - daysSinceMonday);
+  return d;
+}
+
+function formatPartitionName(weekStart: Date): string {
+  const year = weekStart.getUTCFullYear();
+  const month = String(weekStart.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(weekStart.getUTCDate()).padStart(2, '0');
+  return `logs_${year}_${month}_${day}`;
+}
+
+async function ensurePartitionsExist(entries: ValidatedEntry[]): Promise<void> {
+  const weekStarts = new Set<string>();
+
+  for (const entry of entries) {
+    const weekStart = getWeekStart(new Date(entry.ts));
+    weekStarts.add(weekStart.toISOString());
+  }
+
+  for (const weekStartIso of weekStarts) {
+    const weekStart = new Date(weekStartIso);
+    const weekEnd = new Date(weekStart);
+    weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
+
+    const partitionName = formatPartitionName(weekStart);
+
+  await pool.query(
+      `CREATE TABLE IF NOT EXISTS ${partitionName}
+       PARTITION OF logs
+       FOR VALUES FROM ('${weekStart.toISOString()}') TO ('${weekEnd.toISOString()}')`
+    );
+  }
+}
+
+
+
+function escapeCopyValue(value: string): string {
+  return value.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n');
+}
+
+function entryToCopyLine(entry: ValidatedEntry): string {
+  const attributesJson = JSON.stringify(entry.attributes);
+  const fields = [
+    entry.ts,
+    String(entry.level),
+    entry.service,
+    entry.message,
+    attributesJson,
+  ].map((field) => escapeCopyValue(field));
+
+  return fields.join('\t') + '\n';
+}
+
+export async function insertBatch(entries: ValidatedEntry[]): Promise<void> {
+  if (entries.length === 0) return;
+await ensurePartitionsExist(entries);
+  const client = await pool.connect();
+
+  try {
+    const copyStream = client.query(
+      copyFrom(`COPY logs (ts, level, service, message, attributes) FROM STDIN WITH (FORMAT text)`)
+    );
+
+    const dataLines = entries.map(entryToCopyLine).join('');
+    const sourceStream = Readable.from([dataLines]);
+
+    await pipeline(sourceStream, copyStream);
+  } finally {
+    client.release();
+  }
+}
