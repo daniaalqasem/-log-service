@@ -21,6 +21,23 @@ services:
           cpus: "1"
           memory: 1G
 
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://postgres:postgres@db:5432/logs
+      RETENTION_DAYS: 30
+    ports:
+      - "8080:8080"
+    command: sh -c "node dist/scripts/migrate.js && node dist/index.js"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
 volumes:
   pgdata:
- 
