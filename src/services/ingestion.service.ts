@@ -51,7 +51,6 @@ export function validateBatch(rawLogs: unknown[]): ValidationResult {
   return { accepted, rejected };
 }
 
-
 function getWeekStart(date: Date): Date {
   const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
   const dayOfWeek = d.getUTCDay();
@@ -67,6 +66,8 @@ function formatPartitionName(weekStart: Date): string {
   return `logs_${year}_${month}_${day}`;
 }
 
+const knownPartitions = new Set<string>();
+
 async function ensurePartitionsExist(entries: ValidatedEntry[]): Promise<void> {
   const weekStarts = new Set<string>();
 
@@ -77,20 +78,22 @@ async function ensurePartitionsExist(entries: ValidatedEntry[]): Promise<void> {
 
   for (const weekStartIso of weekStarts) {
     const weekStart = new Date(weekStartIso);
+    const partitionName = formatPartitionName(weekStart);
+
+    if (knownPartitions.has(partitionName)) continue;
+
     const weekEnd = new Date(weekStart);
     weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
 
-    const partitionName = formatPartitionName(weekStart);
-
-  await pool.query(
+    await pool.query(
       `CREATE TABLE IF NOT EXISTS ${partitionName}
        PARTITION OF logs
        FOR VALUES FROM ('${weekStart.toISOString()}') TO ('${weekEnd.toISOString()}')`
     );
+
+    knownPartitions.add(partitionName);
   }
 }
-
-
 
 function escapeCopyValue(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/\t/g, '\\t').replace(/\n/g, '\\n');
@@ -111,7 +114,9 @@ function entryToCopyLine(entry: ValidatedEntry): string {
 
 export async function insertBatch(entries: ValidatedEntry[]): Promise<void> {
   if (entries.length === 0) return;
-await ensurePartitionsExist(entries);
+
+  await ensurePartitionsExist(entries);
+
   const client = await pool.connect();
 
   try {
