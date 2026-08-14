@@ -39,9 +39,19 @@ async function runMigrations() {
     if (rows.length > 0) continue;
 
     const sql = readFileSync(join(migrationsDir, file), 'utf-8');
-    await pool.query(sql);
-    await pool.query('INSERT INTO __migrations_applied (name) VALUES ($1)', [file]);
-    console.log(`Applied migration: ${file}`);
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(sql);
+      await client.query('INSERT INTO __migrations_applied (name) VALUES ($1)', [file]);
+      await client.query('COMMIT');
+      console.log(`Applied migration: ${file}`);
+    } catch (error) {
+      await client.query('ROLLBACK');
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   await pool.end();

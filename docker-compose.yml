@@ -2,6 +2,12 @@ services:
   db:
     image: postgres:16
     restart: unless-stopped
+    command: >
+      postgres
+      -c synchronous_commit=off
+      -c shared_buffers=256MB
+      -c max_wal_size=2GB
+      -c wal_buffers=16MB
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
