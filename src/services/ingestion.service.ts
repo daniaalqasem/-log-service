@@ -32,10 +32,7 @@ export function validateBatch(rawLogs: unknown[]): ValidationResult {
 
     if (!result.success) {
       const firstIssue = result.error.issues[0];
-      rejected.push({
-        index,
-        reason: firstIssue.message,
-      });
+      rejected.push({ index, reason: firstIssue.message });
       return;
     }
 
@@ -101,34 +98,78 @@ function escapeCopyValue(value: string): string {
 
 function entryToCopyLine(entry: ValidatedEntry): string {
   const attributesJson = JSON.stringify(entry.attributes);
-  const fields = [
-    entry.ts,
-    String(entry.level),
-    entry.service,
-    entry.message,
-    attributesJson,
-  ].map((field) => escapeCopyValue(field));
-
+  const fields = [entry.ts, String(entry.level), entry.service, entry.message, attributesJson]
+    .map((field) => escapeCopyValue(field));
   return fields.join('\t') + '\n';
 }
 
-export async function insertBatch(entries: ValidatedEntry[]): Promise<void> {
-  if (entries.length === 0) return;
-
+async function copyEntriesToDb(entries: ValidatedEntry[]): Promise<void> {
   await ensurePartitionsExist(entries);
 
   const client = await pool.connect();
-
   try {
     const copyStream = client.query(
       copyFrom(`COPY logs (ts, level, service, message, attributes) FROM STDIN WITH (FORMAT text)`)
     );
-
     const dataLines = entries.map(entryToCopyLine).join('');
     const sourceStream = Readable.from([dataLines]);
-
     await pipeline(sourceStream, copyStream);
   } finally {
     client.release();
   }
+}
+
+interface FlushWaiter {
+  resolve: () => void;
+  reject: (error: unknown) => void;
+}
+
+let pendingQueue: ValidatedEntry[] = [];
+let pendingWaiters: FlushWaiter[] = [];
+let flushTimer: NodeJS.Timeout | null = null;
+
+const FLUSH_INTERVAL_MS = 20;
+const MAX_QUEUE_SIZE = 5000;
+
+async function flushQueue(): Promise<void> {
+  if (pendingQueue.length === 0) return;
+
+  const batch = pendingQueue;
+  const waiters = pendingWaiters;
+  pendingQueue = [];
+  pendingWaiters = [];
+
+  try {
+    await copyEntriesToDb(batch);
+    waiters.forEach((w) => w.resolve());
+  } catch (error) {
+    waiters.forEach((w) => w.reject(error));
+  }
+}
+
+function scheduleFlush(): void {
+  if (flushTimer) return;
+  flushTimer = setTimeout(() => {
+    flushTimer = null;
+    flushQueue();
+  }, FLUSH_INTERVAL_MS);
+}
+
+export function insertBatch(entries: ValidatedEntry[]): Promise<void> {
+  if (entries.length === 0) return Promise.resolve();
+
+  return new Promise((resolve, reject) => {
+    pendingQueue.push(...entries);
+    pendingWaiters.push({ resolve, reject });
+
+    if (pendingQueue.length >= MAX_QUEUE_SIZE) {
+      if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      flushQueue();
+    } else {
+      scheduleFlush();
+    }
+  });
 }
