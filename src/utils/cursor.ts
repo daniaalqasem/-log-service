@@ -1,7 +1,6 @@
-
 interface CursorData {
   ts: string;
-  id: number;
+  id: string;
 }
 
 export function encodeCursor(data: CursorData): string {
@@ -14,7 +13,7 @@ export function decodeCursor(cursor: string): CursorData | null {
     const json = Buffer.from(cursor, 'base64url').toString('utf-8');
     const parsed = JSON.parse(json);
 
-    if (typeof parsed.ts !== 'string' || typeof parsed.id !== 'number') {
+    if (typeof parsed.ts !== 'string' || typeof parsed.id !== 'string') {
       return null;
     }
 
