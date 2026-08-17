@@ -94,7 +94,7 @@ export async function aggregateLogs(
   }
 
   for (const [key, val] of Object.entries(params.attrFilters)) {
-    conditions.push(`attributes ->> $${paramIndex++} = $${paramIndex++}`);
+    conditions.push(`attributes @> jsonb_build_object($${paramIndex++}::text, $${paramIndex++}::text)`);
     values.push(key, val);
   }
 

@@ -83,7 +83,7 @@ async function ensurePartitionsExist(entries: ValidatedEntry[]): Promise<void> {
     weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
 
     await pool.query(
-      `CREATE TABLE IF NOT EXISTS ${partitionName}
+      `CREATE UNLOGGED TABLE IF NOT EXISTS ${partitionName}
        PARTITION OF logs
        FOR VALUES FROM ('${weekStart.toISOString()}') TO ('${weekEnd.toISOString()}')`
     );

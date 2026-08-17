@@ -1,0 +1,1 @@
+ALTER TABLE logs_default SET UNLOGGED;
