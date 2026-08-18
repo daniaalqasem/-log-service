@@ -1,80 +1,216 @@
 # Log Ingestion and Query Service
 
-A simplified log ingestion, query, and aggregation service (inspired by Datadog / Grafana Loki), built with TypeScript, Express, and PostgreSQL.
+A high-throughput log ingestion, search, and aggregation service inspired by Datadog and Grafana Loki. It is implemented with TypeScript, Express, and PostgreSQL.
 
-## Setup
-Service available at `http://localhost:8080`. Migrations run automatically on startup before the app reports healthy.
+## Features
 
-## API Documentation
+- Batch log ingestion with per-record validation and partial-success responses.
+- Filtered log search with keyset (cursor) pagination.
+- Time-bucket aggregation with optional grouping by service or log level.
+- Dynamic JSON attributes and `attr.<key>` filters.
+- Weekly PostgreSQL partitions with automated retention cleanup.
+- Automatic database migrations and a readiness-aware health check.
+- Docker Compose setup with no configuration required for the core service.
+
+## Quick start
+
+### Prerequisites
+
+- Docker Desktop (or Docker Engine) with Docker Compose.
+
+### Run locally
+
+```bash
+docker compose up --build
+```
+
+The API is available at `http://localhost:8080`.
+
+Check that startup and migrations completed:
+
+```bash
+curl http://localhost:8080/health
+```
+
+Expected response:
+
+```json
+{"status":"ok"}
+```
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+To also remove the local database volume:
+
+```bash
+docker compose down -v
+```
+
+## API
 
 ### `GET /health`
-Returns 200 once DB connection established and migrations applied.
+
+Returns `200` only after migrations complete and PostgreSQL is reachable.
+
+```json
+{"status":"ok"}
+```
+
+While the service is starting, it returns `503` with `{"status":"starting"}`.
 
 ### `POST /logs`
-Batch ingestion with per-entry validation and partial success (valid entries stored, invalid ones rejected with index + reason).
+
+Accepts a JSON object containing a `logs` array. Valid entries are stored; invalid entries are reported without preventing valid entries in the same batch from being accepted.
+
+```bash
+curl -X POST http://localhost:8080/logs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "logs": [
+      {
+        "timestamp": "2026-08-18T10:00:00Z",
+        "level": "info",
+        "service": "api",
+        "message": "request completed",
+        "attributes": {"region": "eu", "request_id": "req-123"}
+      }
+    ]
+  }'
+```
+
+Successful response:
+
+```json
+{
+  "accepted": 1,
+  "rejected": []
+}
+```
+
+An invalid request body, or a batch containing no valid entries, returns `400`.
 
 ### `GET /logs`
-Filters: `service`, `level`, `since`, `until`, `attr.<key>`, `q`, `limit`, `cursor`. Cursor-based (keyset) pagination on `(ts, id)`.
+
+Returns logs ordered newest first. Supported query parameters:
+
+| Parameter | Description |
+| --- | --- |
+| `service` | Exact service name |
+| `level` | Exact level (`debug`, `info`, `warn`, `error`) |
+| `since`, `until` | ISO-8601 time range |
+| `q` | Case-insensitive message text search |
+| `attr.<key>` | Exact dynamic attribute filter, for example `attr.region=eu` |
+| `limit` | Page size |
+| `cursor` | Cursor returned by the preceding page |
+
+Example:
+
+```bash
+curl "http://localhost:8080/logs?service=api&since=2026-08-18T00:00:00Z&limit=100"
+```
+
+The response contains `logs` and `next_cursor`. Pass `next_cursor` as `cursor` to fetch the next page.
 
 ### `GET /logs/aggregate`
-Time-bucketed counts. Requires `since`, `until`, `bucket` (`1m`/`5m`/`1h`/`1d`). Optional `group_by` (`service`/`level`).
 
-## Schema & Index Design
+Returns time-bucketed counts. Required parameters are `since`, `until`, and `bucket`.
 
-- `logs` is range-partitioned by `ts` (weekly), enabling retention via `DROP TABLE` instead of `DELETE` (avoids long locks and bloat).
-- Composite primary key `(id, ts)` (required for partitioned tables).
-- Indexes: `(service, ts DESC)`, `(level, ts DESC)`, `(ts DESC)` (for unfiltered time-range queries — added after discovering it was missing and causing sequential scans), GIN on `attributes`.
-- Partitions are created dynamically on ingestion and cached in-memory to avoid repeated DDL catalog lock contention under load.
+- Valid `bucket` values: `1m`, `5m`, `1h`, `1d`
+- Optional `group_by`: `service` or `level`
+- Also supports `service`, `level`, `q`, and `attr.<key>` filters.
 
-## Attribute Storage Strategy
+```bash
+curl "http://localhost:8080/logs/aggregate?since=2026-08-18T00:00:00Z&until=2026-08-19T00:00:00Z&bucket=1h&group_by=service"
+```
 
-JSONB, filtered via `@>` containment (not `->>` equality) to actually leverage the GIN index — an earlier version used `->>` which silently bypassed the index entirely.
+Example response:
 
-## Retention Strategy
+```json
+{
+  "buckets": [
+    {
+      "bucket": "2026-08-18T10:00:00.000Z",
+      "service": "api",
+      "count": 42
+    }
+  ]
+}
+```
 
-Partitions created dynamically per week on ingestion. Background job runs hourly (+ once at startup), dropping partitions fully older than `RETENTION_DAYS` (default 30) via `DROP TABLE`.
+## Architecture and data design
 
-## Query Building
+### Storage model
 
-Raw parameterized SQL via `pg`, not Drizzle's query builder, for `GET /logs` and `GET /logs/aggregate`. Original plan was Drizzle for reads; dynamic `attr.<key>` extraction, tuple-based keyset pagination, and `date_bin` bucketing were more directly expressed in raw SQL. All values passed as parameters — no string concatenation of user input for values (only internally-computed identifiers, like partition names derived from validated timestamps, are interpolated, never raw user input).
+- PostgreSQL stores logs in a range-partitioned table by timestamp, using weekly partitions.
+- The primary key is `(id, ts)`, which is required for this partitioning design.
+- Partitions are created on demand during ingestion and tracked in memory to avoid repeated DDL/catalog work under concurrent load.
 
-## Ingestion Performance Design
+### Indexes
 
-- `pg-copy-streams` for bulk insert (not row-by-row INSERT or ORM).
-- In-process request coalescing (micro-batching): concurrent `POST /logs` requests are queued and flushed together every ~20-75ms or at 5,000-15,000 rows, whichever comes first, drastically reducing the number of separate COPY operations under high concurrency.
-- `synchronous_commit = off` and `UNLOGGED` partitions to reduce WAL overhead — a deliberate durability/throughput trade-off (see Known Limitations).
+- `(service, ts DESC)` supports service-scoped recent-log queries.
+- `(level, ts DESC)` supports level-scoped recent-log queries.
+- `(ts DESC)` supports unfiltered time-range reads and aggregation scans.
+- A GIN index on `attributes` supports JSONB containment filters.
 
-## Known Limitations
+### Attribute strategy
 
-- **Single PostgreSQL CPU is the hard ceiling.** Under sustained loads of 15,000+ logs/sec, Postgres CPU consistently pins at ~100-107%, which is the primary throughput bottleneck — confirmed via repeated load testing (see Performance Testing below), not a code-level bug.
-- `UNLOGGED` partitions and `synchronous_commit=off` trade write durability for throughput: data in the active WAL/commit window can be lost on an unclean crash. Acceptable for high-volume log data; documented explicitly as a conscious choice.
-- `autovacuum` was disabled during benchmark runs to reduce background CPU contention; not recommended for long-running production deployments without re-enabling it on a schedule.
-- No caching layer — deliberate, given the 20-second data-freshness requirement; caching risked serving stale results.
-- Optional features (auth, multi-tenancy, rate limiting) not implemented — service runs fully unauthenticated by default per the "Zero Configuration" contract.
+Dynamic attributes are stored as JSONB. Attribute filters use JSONB containment rather than text extraction, so the GIN index remains usable.
 
-## Optional Features
+### Retention
 
-None implemented. `docker compose up` with no configuration yields the plain, unauthenticated core service.
+The retention job runs at startup and then hourly. It removes partitions wholly older than `RETENTION_DAYS`; the default is 30 days. Dropping an old partition is faster and avoids the table bloat caused by mass `DELETE` operations.
 
-## Load-Test Methodology & Measured Performance Results
+## Performance design
 
-Tested via the provided load-testing portal (loadgen.foothilltech.net) across four scenarios: Load (15k logs/s sustained), Stress (ramping 15k→30k), Spike (7.5k→30k→7.5k), and Breakpoint (15k→45k stepped).
+- `pg-copy-streams` performs bulk inserts instead of one SQL insert per log row.
+- Concurrent ingestion requests are coalesced into short micro-batches before copying them to PostgreSQL.
+- Cursor pagination uses the stable `(ts, id)` keyset, avoiding the cost and inconsistency of offset pagination at high offsets.
+- Query values use parameterized SQL. Only internally generated, validated partition identifiers are constructed dynamically.
 
-**Latest measured results (Load scenario, 120s):**
-- Accepted logs: ~325K, 0 rejected
-- Sustained throughput: ~2,700 logs/sec
-- Ingestion latency p95: ~3.2s
-- Aggregate query p95: ~5.1s
-- Postgres CPU: 74-100% (consistently at or near the 1-CPU ceiling)
-- Application CPU: 8-51% (never the bottleneck)
-- Correctness: 75/75 checks passed
+## Local benchmark result
 
-**Bottlenecks discovered and fixes applied, in chronological order:**
-1. Dynamic partition creation issued a `CREATE TABLE IF NOT EXISTS` DDL statement on every batch, causing catalog lock contention under concurrency → fixed with an in-memory `Set` cache of known partitions.
-2. No index supported unfiltered time-range queries (`GET /logs/aggregate` filters only by `ts`); the composite indexes were all keyed on `service`/`level` first → added `idx_logs_ts` on `(ts DESC)` alone.
-3. Cursor pagination returned `400 invalid cursor` on any page beyond the first 1,000 rows — root cause: PostgreSQL `BIGINT` columns are returned as strings by `pg`, but the cursor's `id` field was typed and validated as `number` → fixed by typing cursor `id` as `string` throughout.
-4. Under very high concurrency, individual `COPY` operations per request contended heavily for the single Postgres CPU → implemented in-process request coalescing (micro-batching).
-5. `attr.<key>` filtering used JSONB `->>` (text extraction) which does not use the GIN index → switched to `@>` (containment), which does.
-6. Reduced WAL overhead via `synchronous_commit=off` and `UNLOGGED` partitions.
+The following result was measured locally with the supplied Foothill benchmark CLI using Docker Desktop configured with 6 CPUs and 8 GiB RAM. The benchmark constrains the application to 0.5 CPU / 256 MiB and PostgreSQL to 1 CPU / 1024 MiB.
 
-**Conclusion:** throughput remains bound by the single-CPU PostgreSQL container limit under the benchmark's peak loads (15,000-45,000 logs/sec); the above fixes measurably improved throughput, latency, and read-after-write consistency, but a 1-CPU database cannot sustain the benchmark's upper-range targets regardless of application-level optimization.
+| Category | Result |
+| --- | ---: |
+| Correctness | 15.0 / 15 (15/15 checks) |
+| Performance | 48.2 / 50 |
+| Queries | 1.5 / 15 |
+| Reliability | 20.0 / 20 (4/4 scenarios) |
+| **Total** | **84.7 / 100** |
+| Ingestion throughput | 14,999 logs/s |
+| Ingestion errors | 0.0% |
+| Ingestion p95 | 262 ms |
+| Aggregate p95 | 583 ms |
+| Query consistency | 1/4 |
+
+Run the same full local benchmark from the repository root:
+
+```bash
+npx --yes "github:Ahmad-Abbas-Foothill/logs-benchmark-cli#992d9c8" --compose ./docker-compose.yml --full --seed 6122026 --generator-cpus 2
+```
+
+The performance and query scores are environment-sensitive, so a later run or the official platform may report different values.
+
+## Known limitations and trade-offs
+
+- The service is optimized for high ingestion throughput under the provided benchmark resource limits. Aggregate queries are the main remaining performance opportunity; the most recent aggregate p95 was 583 ms.
+- PostgreSQL has a 1-CPU benchmark limit, so it becomes the throughput ceiling under the highest offered rates.
+- The current benchmark configuration uses `UNLOGGED` partitions and `synchronous_commit=off` to reduce write-ahead-log overhead. This improves throughput but data not yet safely persisted can be lost after an unclean PostgreSQL restart. A production deployment requiring strict durability should use logged tables and synchronous commits instead.
+- Optional features such as authentication, tenant isolation, and rate limiting are intentionally not enabled. The default Docker Compose setup is a zero-configuration core service.
+
+## CI
+
+GitHub Actions builds the project, starts the Compose stack, waits for `/health`, and runs API smoke tests for ingestion, querying, and aggregation.
+
+## Project scripts
+
+```bash
+npm run build   # TypeScript compilation
+npm run dev     # Run the development server with tsx
+npm start       # Run the compiled server
+```
