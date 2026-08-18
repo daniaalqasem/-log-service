@@ -133,8 +133,8 @@ Example response:
 {
   "buckets": [
     {
-      "bucket": "2026-08-18T10:00:00.000Z",
-      "service": "api",
+      "start": "2026-08-18T10:00:00.000Z",
+      "group": "api",
       "count": 42
     }
   ]
