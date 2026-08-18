@@ -1,4 +1,5 @@
 import express from 'express';
+import { existsSync } from 'node:fs';
 import { pool } from './db/client';
 import { logsRouter } from './routes/logs';
 
@@ -9,6 +10,11 @@ app.use(express.json());
 app.use(logsRouter);
 
 app.get('/health', async (req, res) => {
+  if (!existsSync('/tmp/log-service-ready')) {
+    res.status(503).json({ status: 'starting' });
+    return;
+  }
+
   try {
     await pool.query('SELECT 1');
     res.status(200).json({ status: 'ok' });

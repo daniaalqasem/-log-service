@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Pool } from 'pg';
 
@@ -55,6 +55,7 @@ async function runMigrations() {
   }
 
   await pool.end();
+  writeFileSync('/tmp/log-service-ready', 'ready\n');
 }
 
 runMigrations()
