@@ -185,19 +185,19 @@ The retention job runs at startup and then hourly. It removes partitions wholly 
 
 ### Most recent completed local benchmark
 
-The current benchmark CLI completed one local run with the following environment warning: the test allocated 5.5 of the machine's 6 Docker CPUs, and k6 reported generator saturation in every scenario. Its `machine speed` was `0.46x reference`; therefore performance values below are diagnostic and not comparable to a grader running on a faster machine.
+The current benchmark CLI completed one local run with the following environment warning: the test allocated 5.5 of the machine's 6 Docker CPUs, and k6 reported generator saturation in every scenario. Its `machine speed` was `0.65x reference`; therefore performance values below are diagnostic and not comparable to a grader running on a faster machine.
 
 | Category | Result |
 | --- | ---: |
 | Correctness | 15.0 / 15 (15/15 checks) |
-| Performance | 28.5 / 50 |
+| Performance | 30.1 / 50 |
 | Queries | 0.0 / 15 |
 | Reliability | 20.0 / 20 (4/4 scenarios) |
-| **Total** | **63.5 / 100** |
-| Ingestion throughput | 10,106 logs/s |
+| **Total** | **65.1 / 100** |
+| Ingestion throughput | 11,311 logs/s |
 | Ingestion errors | 0.0% |
-| Ingestion p95 | 4,570 ms |
-| Aggregate p95 | 18,532 ms |
+| Ingestion p95 | 2,675 ms |
+| Aggregate p95 | 10,302 ms |
 | Query consistency | 0/4 |
 
 The run completed all four scenarios without service errors, but it is generator-limited. It should be repeated on a Docker engine with sufficient CPU headroom before treating performance numbers as a final score.
