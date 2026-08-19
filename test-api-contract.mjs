@@ -183,6 +183,13 @@ async function testQuery() {
     `got ${JSON.stringify(b4.logs?.slice(0, 2))}`
   );
 
+  const { body: bNumericAttribute } = await req("/logs?attr.retries=3");
+  ok(
+    "numeric attribute filters use string comparison semantics",
+    bNumericAttribute.logs.every((l) => String(l.attributes?.retries) === "3"),
+    `got ${JSON.stringify(bNumericAttribute.logs?.slice(0, 2))}`
+  );
+
   // Sort order: descending by timestamp
   const { body: b5 } = await req("/logs?limit=20");
   const timestamps = b5.logs.map((l) => new Date(l.timestamp).getTime());

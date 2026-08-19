@@ -15,7 +15,7 @@ interface ValidatedEntry {
   level: number;
   service: string;
   message: string;
-  attributes: Record<string, string | number | boolean>;
+  attributes: Record<string, string>;
 }
 
 interface ValidationResult {
@@ -41,7 +41,12 @@ export function validateBatch(rawLogs: unknown[]): ValidationResult {
       level: levelToInt(result.data.level),
       service: result.data.service,
       message: result.data.message,
-      attributes: result.data.attributes ?? {},
+      // The API compares attributes as strings. Normalising after validation
+      // preserves acceptance of string/number/boolean input while making the
+      // stored JSONB representation and every attr.<key> query deterministic.
+      attributes: Object.fromEntries(
+        Object.entries(result.data.attributes ?? {}).map(([key, value]) => [key, String(value)])
+      ),
     });
   });
 
@@ -83,7 +88,7 @@ async function ensurePartitionsExist(entries: ValidatedEntry[]): Promise<void> {
     weekEnd.setUTCDate(weekEnd.getUTCDate() + 7);
 
     await pool.query(
-      `CREATE UNLOGGED TABLE IF NOT EXISTS ${partitionName}
+      `CREATE TABLE IF NOT EXISTS ${partitionName}
        PARTITION OF logs
        FOR VALUES FROM ('${weekStart.toISOString()}') TO ('${weekEnd.toISOString()}')`
     );

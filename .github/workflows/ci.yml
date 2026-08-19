@@ -39,21 +39,8 @@ jobs:
           docker compose logs
           exit 1
 
-      - name: Smoke test - POST /logs
-        run: |
-          curl -sf -X POST http://localhost:8080/logs \
-            -H "Content-Type: application/json" \
-            -d '{"logs":[{"timestamp":"2026-01-01T00:00:00Z","level":"info","service":"ci","message":"smoke test"}]}' \
-            | grep '"accepted":1'
-
-      - name: Smoke test - GET /logs
-        run: |
-          curl -sf "http://localhost:8080/logs?service=ci" | grep '"service":"ci"'
-
-      - name: Smoke test - GET /logs/aggregate
-        run: |
-          curl -sf "http://localhost:8080/logs/aggregate?since=2026-01-01T00:00:00Z&until=2026-01-02T00:00:00Z&bucket=1h" \
-            | grep 'buckets'
+      - name: Required API contract test
+        run: node test-api-contract.mjs
 
       - name: Tear down
         if: always()

@@ -21,7 +21,7 @@ A high-throughput log ingestion, search, and aggregation service inspired by Dat
 ### Run locally
 
 ```bash
-docker compose up --build
+docker compose up
 ```
 
 The API is available at `http://localhost:8080`.
@@ -158,7 +158,7 @@ Example response:
 
 ### Attribute strategy
 
-Dynamic attributes are stored as JSONB. Attribute filters use JSONB containment rather than text extraction, so the GIN index remains usable.
+Dynamic attributes are stored as JSONB. The API accepts strings, numbers, and booleans, then normalizes their stored values to strings. This matches the API contract's string-comparison semantics for `attr.<key>` filters and keeps JSONB containment filters compatible with the GIN index.
 
 ### Retention
 
@@ -170,37 +170,57 @@ The retention job runs at startup and then hourly. It removes partitions wholly 
 - Concurrent ingestion requests are coalesced into short micro-batches before copying them to PostgreSQL.
 - Cursor pagination uses the stable `(ts, id)` keyset, avoiding the cost and inconsistency of offset pagination at high offsets.
 - Query values use parameterized SQL. Only internally generated, validated partition identifiers are constructed dynamically.
+- A `POST /logs` response is returned only after its COPY operation completes against logged PostgreSQL tables using PostgreSQL's default synchronous commit behavior.
 
-## Local benchmark result
+## Performance testing
 
-The following result was measured locally with the supplied Foothill benchmark CLI using Docker Desktop configured with 6 CPUs and 8 GiB RAM. The benchmark constrains the application to 0.5 CPU / 256 MiB and PostgreSQL to 1 CPU / 1024 MiB.
+### Test environment and workload
+
+- Host: Windows 11 with Docker Desktop / WSL2.
+- Docker engine: 6 CPUs and 8 GiB RAM.
+- Benchmark limits: application 0.5 CPU / 256 MiB; PostgreSQL 1 CPU / 1024 MiB.
+- Dataset: the supplied benchmark seeds 1,000,000 fixture rows before load scenarios.
+- Ingestion: concurrent HTTP batches; the service coalesces pending entries for up to 20 ms or 5,000 entries before a PostgreSQL COPY operation.
+- Queries: the benchmark exercises log queries and aggregation while ingesting. The project target is one aggregation request per second under load.
+
+### Most recent completed local benchmark
+
+The current benchmark CLI completed one local run with the following environment warning: the test allocated 5.5 of the machine's 6 Docker CPUs, and k6 reported generator saturation in every scenario. Its `machine speed` was `0.46x reference`; therefore performance values below are diagnostic and not comparable to a grader running on a faster machine.
 
 | Category | Result |
 | --- | ---: |
 | Correctness | 15.0 / 15 (15/15 checks) |
-| Performance | 48.2 / 50 |
-| Queries | 1.5 / 15 |
+| Performance | 28.5 / 50 |
+| Queries | 0.0 / 15 |
 | Reliability | 20.0 / 20 (4/4 scenarios) |
-| **Total** | **84.7 / 100** |
-| Ingestion throughput | 14,999 logs/s |
+| **Total** | **63.5 / 100** |
+| Ingestion throughput | 10,106 logs/s |
 | Ingestion errors | 0.0% |
-| Ingestion p95 | 262 ms |
-| Aggregate p95 | 583 ms |
-| Query consistency | 1/4 |
+| Ingestion p95 | 4,570 ms |
+| Aggregate p95 | 18,532 ms |
+| Query consistency | 0/4 |
 
-Run the same full local benchmark from the repository root:
+The run completed all four scenarios without service errors, but it is generator-limited. It should be repeated on a Docker engine with sufficient CPU headroom before treating performance numbers as a final score.
+
+Run the current supplied benchmark from the repository root:
 
 ```bash
-npx --yes "github:Ahmad-Abbas-Foothill/logs-benchmark-cli#992d9c8" --compose ./docker-compose.yml --full --seed 6122026 --generator-cpus 2
+npx --yes github:Ahmad-Abbas-Foothill/logs-benchmark-cli --compose ./docker-compose.yml --full --seed 6122026 --runner docker --json benchmark-report.json --generator-cpus 4
 ```
 
-The performance and query scores are environment-sensitive, so a later run or the official platform may report different values.
+### Bottlenecks and optimizations
+
+- PostgreSQL is the principal bottleneck under the one-CPU benchmark limit.
+- Dynamic partition DDL is cached in process to avoid repeated catalog work for an already-known weekly partition.
+- Bulk COPY and request coalescing reduce per-request SQL overhead.
+- Time, service, level, and JSONB indexes align with the required query filters.
+- Cursor pagination avoids high-offset scans.
 
 ## Known limitations and trade-offs
 
-- The service is optimized for high ingestion throughput under the provided benchmark resource limits. Aggregate queries are the main remaining performance opportunity; the most recent aggregate p95 was 583 ms.
+- The latest Windows benchmark was generator-limited because Docker had insufficient CPU headroom. Its latency and throughput measurements are not representative of the service on the reference machine.
 - PostgreSQL has a 1-CPU benchmark limit, so it becomes the throughput ceiling under the highest offered rates.
-- The current benchmark configuration uses `UNLOGGED` partitions and `synchronous_commit=off` to reduce write-ahead-log overhead. This improves throughput but data not yet safely persisted can be lost after an unclean PostgreSQL restart. A production deployment requiring strict durability should use logged tables and synchronous commits instead.
+- The project prioritizes durable acknowledgements: partitions are logged and PostgreSQL uses its default synchronous-commit behavior. This can reduce maximum ingestion throughput compared with an unsafe asynchronous configuration.
 - Optional features such as authentication, tenant isolation, and rate limiting are intentionally not enabled. The default Docker Compose setup is a zero-configuration core service.
 
 ## CI
